@@ -1,0 +1,21 @@
+# Generated notebook outputs
+MatRisk_AI_Pipeline_executed.ipynb
+*.ipynb_checkpoints/
+.ipynb_checkpoints/
+
+# Generated CSV outputs
+DS1_with_MQI.csv
+candidate_alloys_ranked.csv
+
+# Generated plots
+pareto_front_plot.png
+*.png
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Jupyter
+.jupyter/

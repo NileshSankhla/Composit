@@ -13,6 +13,7 @@ from xgboost import XGBRegressor
 
 print('All libraries imported successfully!')
 
+# ── Load data ──────────────────────────────────────────────────────────────────
 ds1 = pd.read_csv('DS1_material_properties_5500.csv')
 ds4 = pd.read_csv('DS4_ mqi_weights.csv')
 
@@ -20,10 +21,9 @@ print('DS1 shape:', ds1.shape)
 print('\nMQI Weights (DS4):')
 print(ds4)
 
-ds1.head()
-
 df = ds1.copy()
 
+# ── Categorical encoding ───────────────────────────────────────────────────────
 le_crystal  = LabelEncoder()
 le_category = LabelEncoder()
 
@@ -31,8 +31,8 @@ df['crystal_system_enc'] = le_crystal.fit_transform(df['crystal_system'])
 df['category_enc']       = le_category.fit_transform(df['category'])
 
 print('Encoding done!')
-df[['crystal_system', 'crystal_system_enc', 'category', 'category_enc']].head(5)
 
+# ── Compute MQI (Material Quality Index) ──────────────────────────────────────
 # Weights from DS4
 weights = {
     'bulk_modulus_GPa':             0.20,
@@ -71,26 +71,10 @@ plt.tight_layout()
 plt.show()
 
 print('\nTop 5 materials by MQI:')
-df[['material_id', 'formula', 'category', 'MQI']].sort_values(
-    'MQI', ascending=False).head(5)
+print(df[['material_id', 'formula', 'category', 'MQI']].sort_values(
+    'MQI', ascending=False).head(5))
 
-model = Pipeline([
-    ('scaler', StandardScaler()),
-    ('xgb', XGBRegressor(
-        n_estimators     = 300,   # number of trees
-        max_depth        = 6,     # depth of each tree
-        learning_rate    = 0.05,  # how fast it learns
-        subsample        = 0.8,   # 80% of data per tree
-        colsample_bytree = 0.8,   # 80% of features per tree
-        random_state     = 42,
-        n_jobs           = -1     # use all CPU cores
-    ))
-])
-
-print('Training XGBoost model...')
-model.fit(X_train, y_train)
-print('Training complete!')
-
+# ── Feature set & train/test split ────────────────────────────────────────────
 FEATURES = [
     # Structural
     'n_elements',
@@ -130,10 +114,26 @@ X_train, X_test, y_train, y_test = train_test_split(
 print(f'Training samples : {X_train.shape[0]}')
 print(f'Testing  samples : {X_test.shape[0]}')
 
-# First, fit the model to your training data
-model.fit(X_train, y_train)  # Add this line to train the model
+# ── Build and train XGBoost model ──────────────────────────────────────────────
+model = Pipeline([
+    ('scaler', StandardScaler()),
+    ('xgb', XGBRegressor(
+        n_estimators     = 300,   # number of trees
+        max_depth        = 6,     # depth of each tree
+        learning_rate    = 0.05,  # how fast it learns
+        subsample        = 0.8,   # 80% of data per tree
+        colsample_bytree = 0.8,   # 80% of features per tree
+        tree_method      = 'hist',
+        random_state     = 42,
+        n_jobs           = -1     # use all CPU cores
+    ))
+])
 
-# Now you can make predictions
+print('Training XGBoost model...')
+model.fit(X_train, y_train)
+print('Training complete!')
+
+# ── Evaluate ───────────────────────────────────────────────────────────────────
 y_pred = model.predict(X_test)
 
 mae  = mean_absolute_error(y_test, y_pred)
@@ -158,7 +158,7 @@ axes[0].set_title(f'Actual vs Predicted MQI\nR² = {r2:.4f}')
 axes[0].legend()
 
 # Plot 2: Residuals
-residuals = y_test - y_pred
+residuals = y_test.values - y_pred
 axes[1].hist(residuals, bins=50, color='salmon', edgecolor='white')
 axes[1].axvline(0, color='black', linestyle='--', lw=2)
 axes[1].set_xlabel('Error (Actual - Predicted)')
@@ -181,10 +181,11 @@ plt.show()
 
 print('Most important feature:', feat_imp.idxmax())
 
+# ── Save output ────────────────────────────────────────────────────────────────
 df['MQI_predicted'] = model.predict(X)
 
 output = df[['material_id', 'formula', 'category', 'crystal_system', 'MQI', 'MQI_predicted']]
 output.to_csv('DS1_with_MQI.csv', index=False)
 
 print('Saved to DS1_with_MQI.csv')
-output.head(10)
+print(output.head(10))
