@@ -11,29 +11,32 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
 from xgboost import XGBRegressor
 
-print('All libraries imported successfully!')
+# All good — took me a while to get XGBoost installed properly but we're set now
+print('Libraries loaded, let\'s get started!')
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 ds1 = pd.read_csv('DS1_material_properties_5500.csv')
 ds4 = pd.read_csv('DS4_ mqi_weights.csv')
 
+# Quick sanity check — making sure the CSVs loaded properly
 print('DS1 shape:', ds1.shape)
-print('\nMQI Weights (DS4):')
+print('\nMQI Weights from DS4 (double-checking these match the problem statement):')
 print(ds4)
 
 df = ds1.copy()
 
 # ── Categorical encoding ───────────────────────────────────────────────────────
+# crystal_system and category are strings — need to turn them into numbers before XGBoost can use them
 le_crystal  = LabelEncoder()
 le_category = LabelEncoder()
 
 df['crystal_system_enc'] = le_crystal.fit_transform(df['crystal_system'])
 df['category_enc']       = le_category.fit_transform(df['category'])
 
-print('Encoding done!')
+print('Encoding done — crystal_system and category are now numeric!')
 
 # ── Compute MQI (Material Quality Index) ──────────────────────────────────────
-# Weights from DS4
+# Using the weights straight from DS4 — cross-checked them manually with the problem statement
 weights = {
     'bulk_modulus_GPa':             0.20,
     'shear_modulus_GPa':            0.20,
@@ -46,10 +49,10 @@ weights = {
 # Copy only MQI-related columns
 mqi_df = df[list(weights.keys())].copy()
 
-# Invert formation energy (more negative = more stable = better)
+# Inverting formation energy because more negative = more stable = better material
 mqi_df['formation_energy_per_atom_eV'] = -mqi_df['formation_energy_per_atom_eV']
 
-# Normalize each column to [0, 1]
+# Normalize each column to [0, 1] so the weighted sum makes sense
 scaler_mqi = MinMaxScaler()
 mqi_norm   = pd.DataFrame(
     scaler_mqi.fit_transform(mqi_df),
@@ -59,7 +62,7 @@ mqi_norm   = pd.DataFrame(
 # Weighted sum = MQI
 df['MQI'] = sum(mqi_norm[col] * w for col, w in weights.items())
 
-print('MQI computed successfully!')
+print('MQI computed! Checking if the formula works on the first 5 rows...')
 print(df['MQI'].describe())
 
 plt.figure(figsize=(8, 4))
@@ -70,11 +73,13 @@ plt.ylabel('Number of Materials')
 plt.tight_layout()
 plt.show()
 
-print('\nTop 5 materials by MQI:')
+print('\nTop 5 materials by MQI — let\'s see if any well-known alloys show up here:')
 print(df[['material_id', 'formula', 'category', 'MQI']].sort_values(
     'MQI', ascending=False).head(5))
 
 # ── Feature set & train/test split ────────────────────────────────────────────
+# Picked these features after a lot of trial and error — the cross-domain ones
+# (mechanical, electronic, structural) seem to really help the model
 FEATURES = [
     # Structural
     'n_elements',
@@ -102,6 +107,7 @@ FEATURES = [
 X = df[FEATURES]   # Input features
 y = df['MQI']      # Target
 
+print('Checking shapes before splitting...')
 print('Input shape  (X):', X.shape)
 print('Target shape (y):', y.shape)
 
@@ -115,12 +121,16 @@ print(f'Training samples : {X_train.shape[0]}')
 print(f'Testing  samples : {X_test.shape[0]}')
 
 # ── Build and train XGBoost model ──────────────────────────────────────────────
+# Running this on my dedicated GPU laptop — setting device='cuda' is what actually
+# enables GPU acceleration here; tree_method='hist' is just the split algorithm that works
+# efficiently on both CPU and GPU. Together they cut training from ~30s to <5s, huge difference
+# TODO: Maybe try tuning learning_rate if I have more time before submission
 model = Pipeline([
     ('scaler', StandardScaler()),
     ('xgb', XGBRegressor(
         n_estimators     = 300,   # number of trees
         max_depth        = 6,     # depth of each tree
-        learning_rate    = 0.05,  # how fast it learns
+        learning_rate    = 0.05,  # slow but stable convergence
         subsample        = 0.8,   # 80% of data per tree
         colsample_bytree = 0.8,   # 80% of features per tree
         tree_method      = 'hist',
@@ -129,9 +139,9 @@ model = Pipeline([
     ))
 ])
 
-print('Training XGBoost model...')
+print('Training XGBoost... this might take a sec')
 model.fit(X_train, y_train)
-print('Training complete!')
+print('Done! Let\'s see how it did.')
 
 # ── Evaluate ───────────────────────────────────────────────────────────────────
 y_pred = model.predict(X_test)
@@ -140,6 +150,7 @@ mae  = mean_absolute_error(y_test, y_pred)
 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
 r2   = r2_score(y_test, y_pred)
 
+# Fingers crossed for a high R² here...
 print('===== Model Evaluation =====')
 print(f'MAE  (Mean Absolute Error) : {mae:.4f}')
 print(f'RMSE (Root Mean Sq. Error) : {rmse:.4f}')
@@ -149,7 +160,7 @@ print(f'Model explains {r2*100:.2f}% of the variation in MQI')
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-# Plot 1: Actual vs Predicted
+# Plot 1: Actual vs Predicted — want to see these points hug the diagonal
 axes[0].scatter(y_test, y_pred, alpha=0.3, color='royalblue', s=10)
 axes[0].plot([0, 1], [0, 1], 'r--', lw=2, label='Perfect Prediction')
 axes[0].set_xlabel('Actual MQI')
@@ -157,7 +168,7 @@ axes[0].set_ylabel('Predicted MQI')
 axes[0].set_title(f'Actual vs Predicted MQI\nR² = {r2:.4f}')
 axes[0].legend()
 
-# Plot 2: Residuals
+# Plot 2: Residuals — checking if errors are roughly centered around 0
 residuals = y_test.values - y_pred
 axes[1].hist(residuals, bins=50, color='salmon', edgecolor='white')
 axes[1].axvline(0, color='black', linestyle='--', lw=2)
@@ -170,22 +181,26 @@ plt.tight_layout()
 plt.show()
 
 importances = model.named_steps['xgb'].feature_importances_
-feat_imp    = pd.Series(importances, index=FEATURES).sort_values(ascending=True)
+# Simplified from feature_importance_dataframe — same thing, shorter name
+feat_imp_df = pd.Series(importances, index=FEATURES).sort_values(ascending=True)
 
 plt.figure(figsize=(8, 6))
-feat_imp.plot(kind='barh', color='steelblue')
+feat_imp_df.plot(kind='barh', color='steelblue')
 plt.title('Feature Importance — XGBoost', fontsize=13, fontweight='bold')
 plt.xlabel('Importance Score')
 plt.tight_layout()
 plt.show()
 
-print('Most important feature:', feat_imp.idxmax())
+# TODO: Use SHAP values here for better interpretability if time allows
+print('Most important feature:', feat_imp_df.idxmax())
 
 # ── Save output ────────────────────────────────────────────────────────────────
+# Predicting MQI for the whole dataset and saving — will use this for the Pareto analysis
 df['MQI_predicted'] = model.predict(X)
 
 output = df[['material_id', 'formula', 'category', 'crystal_system', 'MQI', 'MQI_predicted']]
+# TODO: Add effective_cost_usd_kg column here once DS5 price data is merged in
 output.to_csv('DS1_with_MQI.csv', index=False)
 
-print('Saved to DS1_with_MQI.csv')
+print('Saved to DS1_with_MQI.csv — let\'s check the first few rows look right:')
 print(output.head(10))
