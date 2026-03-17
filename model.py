@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import seaborn as sns
 import warnings
 warnings.filterwarnings('ignore')
@@ -32,15 +33,20 @@ df['category_enc']       = le_category.fit_transform(df['category'])
 
 print('Encoding done!')
 
-# ── Compute MQI (Material Quality Index) ──────────────────────────────────────
-# Weights from DS4
+# ── D4: Compute MQI weights from DS4 ──────────────────────────────────────────
+# Map DS4 property names to DS1 column names
+_property_map = {
+    'Bulk Modulus (K)':  'bulk_modulus_GPa',
+    'Shear Modulus (G)': 'shear_modulus_GPa',
+    'Formation Energy':  'formation_energy_per_atom_eV',
+    'Density':           'density_g_cm3',
+    'Melting Point':     'melting_point_K',
+    'Band Gap':          'band_gap_eV',
+}
 weights = {
-    'bulk_modulus_GPa':             0.20,
-    'shear_modulus_GPa':            0.20,
-    'formation_energy_per_atom_eV': 0.20,
-    'density_g_cm3':                0.10,
-    'melting_point_K':              0.15,
-    'band_gap_eV':                  0.15,
+    _property_map[prop]: w
+    for prop, w in ds4.set_index('Property')['Weights'].items()
+    if prop in _property_map
 }
 
 # Copy only MQI-related columns
@@ -189,3 +195,181 @@ output.to_csv('DS1_with_MQI.csv', index=False)
 
 print('Saved to DS1_with_MQI.csv')
 print(output.head(10))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D2 + D3 — Commodity Price Prediction with Cross-Domain Material Features
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Load DS2 (commodity prices) and DS3 (cross-domain features) ───────────────
+ds2 = pd.read_csv('DS2_commodity_prices_10yr.csv', parse_dates=['date'])
+ds3 = pd.read_csv('DS3_crossdomain_features_daily.csv', parse_dates=['date'])
+
+print('\nDS2 shape:', ds2.shape)
+print('DS3 shape:', ds3.shape)
+
+# ── Merge DS2 + DS3 on date and commodity (DS3 enriches DS2) ──────────────────
+merged = pd.merge(ds2, ds3, on=['date', 'commodity'], how='inner')
+print('Merged shape (DS2 + DS3):', merged.shape)
+
+# ── Target: next-day close price ──────────────────────────────────────────────
+merged = merged.sort_values(['commodity', 'date']).reset_index(drop=True)
+merged['next_close'] = merged.groupby('commodity')['close'].shift(-1)
+merged = merged.dropna(subset=['next_close'])
+
+# ── Encode commodity as a numeric feature ─────────────────────────────────────
+le_commodity = LabelEncoder()
+merged['commodity_enc'] = le_commodity.fit_transform(merged['commodity'])
+
+# ── Feature sets ──────────────────────────────────────────────────────────────
+# DS2 financial indicators
+DS2_FEATURES = [
+    'commodity_enc',
+    'open', 'high', 'low', 'close', 'volume',
+    'daily_return', 'return_5d', 'return_21d',
+    'volatility_5d_ann', 'volatility_21d_ann', 'volatility_63d_ann',
+    'sma_21', 'sma_63',
+    'bollinger_upper', 'bollinger_lower', 'bollinger_z',
+    'rsi_14', 'macd', 'macd_signal',
+    'momentum_10d', 'momentum_21d',
+    'term_spread',
+]
+
+# DS3 cross-domain material-science signals
+DS3_FEATURES = [
+    'mqi',
+    'supply_disruption_prob',
+    'substitution_elasticity',
+    'green_premium_per_kg',
+    'carbon_intensity_virgin',
+    'carbon_intensity_recycled',
+    'herfindahl_index',
+    'mqi_5d_trend',
+    'mqi_21d_trend',
+    'mqi_63d_trend',
+]
+
+ALL_FEATURES = DS2_FEATURES + DS3_FEATURES
+
+# Drop rows where any feature is NaN
+merged_clean = merged[ALL_FEATURES + ['next_close']].dropna()
+print(f'Samples after dropping NaNs: {len(merged_clean)}')
+
+X_comm = merged_clean[ALL_FEATURES]
+y_comm = merged_clean['next_close']
+
+X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(
+    X_comm, y_comm, test_size=0.2, random_state=42
+)
+print(f'Commodity training samples : {X_train_c.shape[0]}')
+print(f'Commodity testing  samples : {X_test_c.shape[0]}')
+
+# ── Train Model A: DS2 features only (baseline) ───────────────────────────────
+model_ds2 = Pipeline([
+    ('scaler', StandardScaler()),
+    ('xgb', XGBRegressor(
+        n_estimators     = 300,
+        max_depth        = 6,
+        learning_rate    = 0.05,
+        subsample        = 0.8,
+        colsample_bytree = 0.8,
+        tree_method      = 'hist',
+        random_state     = 42,
+        n_jobs           = -1,
+    ))
+])
+print('\nTraining commodity model (DS2 only)...')
+model_ds2.fit(X_train_c[DS2_FEATURES], y_train_c)
+
+y_pred_ds2 = model_ds2.predict(X_test_c[DS2_FEATURES])
+mae_ds2  = mean_absolute_error(y_test_c, y_pred_ds2)
+rmse_ds2 = np.sqrt(mean_squared_error(y_test_c, y_pred_ds2))
+r2_ds2   = r2_score(y_test_c, y_pred_ds2)
+print('=== DS2-only Model ===')
+print(f'MAE  : {mae_ds2:.4f}')
+print(f'RMSE : {rmse_ds2:.4f}')
+print(f'R²   : {r2_ds2:.4f}')
+
+# ── Train Model B: DS2 + DS3 features (cross-domain enriched) ─────────────────
+model_ds2_ds3 = Pipeline([
+    ('scaler', StandardScaler()),
+    ('xgb', XGBRegressor(
+        n_estimators     = 300,
+        max_depth        = 6,
+        learning_rate    = 0.05,
+        subsample        = 0.8,
+        colsample_bytree = 0.8,
+        tree_method      = 'hist',
+        random_state     = 42,
+        n_jobs           = -1,
+    ))
+])
+print('\nTraining commodity model (DS2 + DS3)...')
+model_ds2_ds3.fit(X_train_c[ALL_FEATURES], y_train_c)
+
+y_pred_all = model_ds2_ds3.predict(X_test_c[ALL_FEATURES])
+mae_all  = mean_absolute_error(y_test_c, y_pred_all)
+rmse_all = np.sqrt(mean_squared_error(y_test_c, y_pred_all))
+r2_all   = r2_score(y_test_c, y_pred_all)
+print('=== DS2 + DS3 (Cross-Domain) Model ===')
+print(f'MAE  : {mae_all:.4f}')
+print(f'RMSE : {rmse_all:.4f}')
+print(f'R²   : {r2_all:.4f}')
+
+# ── Compare the two models ─────────────────────────────────────────────────────
+print('\n=== Impact of Adding DS3 Cross-Domain Features ===')
+print(f'R² improvement : {(r2_all - r2_ds2)*100:.2f} percentage points')
+print(f'MAE  reduction : {mae_ds2 - mae_all:.4f}')
+print(f'RMSE reduction : {rmse_ds2 - rmse_all:.4f}')
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+axes[0].scatter(y_test_c, y_pred_all, alpha=0.3, color='royalblue', s=5)
+axes[0].plot(
+    [y_test_c.min(), y_test_c.max()],
+    [y_test_c.min(), y_test_c.max()],
+    'r--', lw=2, label='Perfect Prediction'
+)
+axes[0].set_xlabel('Actual Next-Day Close')
+axes[0].set_ylabel('Predicted Next-Day Close')
+axes[0].set_title(f'Actual vs Predicted (DS2 + DS3)\nR² = {r2_all:.4f}')
+axes[0].legend()
+
+metrics = ['MAE', 'RMSE', 'R²']
+ds2_scores   = [mae_ds2,  rmse_ds2,  r2_ds2]
+ds2ds3_scores = [mae_all, rmse_all,  r2_all]
+x = np.arange(len(metrics))
+width = 0.35
+axes[1].bar(x - width/2, ds2_scores,   width, label='DS2 only',    color='steelblue')
+axes[1].bar(x + width/2, ds2ds3_scores, width, label='DS2 + DS3',  color='mediumseagreen')
+axes[1].set_xticks(x)
+axes[1].set_xticklabels(metrics)
+axes[1].set_title('Model Comparison: DS2 vs DS2+DS3')
+axes[1].legend()
+
+plt.suptitle('Commodity Price Prediction — XGBoost', fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+# ── Feature importance for cross-domain model ─────────────────────────────────
+importances_comm = model_ds2_ds3.named_steps['xgb'].feature_importances_
+feat_imp_comm    = pd.Series(importances_comm, index=ALL_FEATURES).sort_values(ascending=True)
+
+plt.figure(figsize=(10, 8))
+colors = ['mediumseagreen' if f in DS3_FEATURES else 'steelblue' for f in feat_imp_comm.index]
+feat_imp_comm.plot(kind='barh', color=colors)
+plt.title('Feature Importance — Commodity Price Model (DS2 + DS3)', fontsize=13, fontweight='bold')
+plt.xlabel('Importance Score')
+
+blue_patch  = mpatches.Patch(color='steelblue',      label='DS2 (Financial)')
+green_patch = mpatches.Patch(color='mediumseagreen', label='DS3 (Material Science)')
+plt.legend(handles=[blue_patch, green_patch])
+plt.tight_layout()
+plt.show()
+
+print('Most important feature (commodity model):', feat_imp_comm.idxmax())
+
+# ── Save enriched commodity predictions ───────────────────────────────────────
+merged_clean = merged_clean.copy()
+merged_clean['next_close_predicted'] = model_ds2_ds3.predict(X_comm)
+merged_clean.to_csv('DS2_DS3_with_predictions.csv', index=False)
+print('Saved to DS2_DS3_with_predictions.csv')
