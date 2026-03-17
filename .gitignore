@@ -6,6 +6,7 @@ MatRisk_AI_Pipeline_executed.ipynb
 # Generated CSV outputs
 DS1_with_MQI.csv
 candidate_alloys_ranked.csv
+DS2_DS3_with_predictions.csv
 
 # Generated plots
 pareto_front_plot.png
